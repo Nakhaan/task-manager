@@ -71,6 +71,8 @@ export default defineSchema({
     userId: v.id("users"),
     startTime: v.number(),
     endTime: v.optional(v.number()),
+    // Manual time entries (positive or negative adjustment)
+    isManual: v.optional(v.boolean()),
   })
     .index("by_userId", ["userId"])
     .index("by_taskId", ["taskId"])
@@ -81,5 +83,12 @@ export default defineSchema({
     userId: v.id("users"),
     taskId: v.id("tasks"),
     sessionId: v.id("timeSessions"),
+  }).index("by_userId", ["userId"]),
+
+  // Per-user preferences & settings
+  userSettings: defineTable({
+    userId: v.id("users"),
+    autoStopEnabled: v.boolean(),
+    autoStopHour: v.number(), // 0–23 (UTC hour to stop the timer)
   }).index("by_userId", ["userId"]),
 });

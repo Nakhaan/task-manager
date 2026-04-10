@@ -191,8 +191,10 @@ export const deleteTask = mutation({
     const isAdmin = profile?.role === "admin";
     const isOwner = project?.ownerId === userId;
     const isCreator = task.creatorId === userId;
+    const isAssignee = task.assigneeId === userId;
 
-    if (!isAdmin && !isOwner && !isCreator) throw new Error("Unauthorized");
+    if (!isAdmin && !isOwner && !isCreator && !isAssignee)
+      throw new Error("Unauthorized");
 
     await ctx.db.delete(args.taskId);
   },

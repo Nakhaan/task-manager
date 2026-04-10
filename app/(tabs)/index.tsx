@@ -4,12 +4,16 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { BlurView } from 'expo-blur';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useAuthActions } from '@convex-dev/auth/react';
@@ -38,19 +42,29 @@ const STATUS_COLOR: Record<string, string> = {
   completed: '#6b7280',
 };
 
+const UTC_HOURS = Array.from({ length: 24 }, (_, i) => i);
+
 export default function TimerScreen() {
   const router = useRouter();
   const { signOut } = useAuthActions();
   const currentUser = useQuery(api.users.getCurrentUser);
   const activeTimer = useQuery(api.timers.getActiveTimer);
   const tasksWithTime = useQuery(api.timers.getMyTasksWithTime);
+  const departments = useQuery(api.departments.getDepartments);
+  const settings = useQuery(api.userSettings.getUserSettings);
 
   const startTimer = useMutation(api.timers.startTimer);
   const pauseTimer = useMutation(api.timers.pauseTimer);
+  const updateSettings = useMutation(api.userSettings.updateUserSettings);
 
   const [elapsed, setElapsed] = useState(0);
   const [showPicker, setShowPicker] = useState(false);
+  const [showHourPicker, setShowHourPicker] = useState(false);
+  const [deptFilter, setDeptFilter] = useState<Id<'departments'> | 'all'>('all');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const isIOS = Platform.OS === 'ios';
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
@@ -66,6 +80,19 @@ export default function TimerScreen() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [activeTimer?.startTime, activeTimer?.taskId, activeTimer?.previousMs]);
+
+  // Client-side auto-stop check (fires even when app is open)
+  useEffect(() => {
+    if (!settings?.autoStopEnabled || !activeTimer) return;
+    const checkStop = () => {
+      const now = new Date();
+      if (now.getUTCHours() === settings.autoStopHour && now.getUTCMinutes() === 0) {
+        pauseTimer().catch(() => {});
+      }
+    };
+    const id = setInterval(checkStop, 30000); // check every 30s
+    return () => clearInterval(id);
+  }, [settings, activeTimer]);
 
   async function handleStart(taskId: Id<'tasks'>) {
     setShowPicker(false);
@@ -84,13 +111,36 @@ export default function TimerScreen() {
     }
   }
 
+  async function toggleAutoStop(val: boolean) {
+    await updateSettings({
+      autoStopEnabled: val,
+      autoStopHour: settings?.autoStopHour ?? 17, // default 17:00 UTC ≈ 18:00 CET
+    }).catch(() => {});
+  }
+
+  async function setAutoStopHour(h: number) {
+    await updateSettings({
+      autoStopEnabled: settings?.autoStopEnabled ?? true,
+      autoStopHour: h,
+    }).catch(() => {});
+    setShowHourPicker(false);
+  }
+
   const isRunning = !!activeTimer;
   const activeTask = activeTimer?.task;
 
+  const allTasks = tasksWithTime ?? [];
+  const filteredTasks = deptFilter === 'all'
+    ? allTasks
+    : allTasks.filter((t) => t.departmentId === deptFilter);
+
+  const autoStopHour = settings?.autoStopHour ?? 17;
+  const autoStopEnabled = settings?.autoStopEnabled ?? false;
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, isIOS && styles.containerIOS]}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <Text style={styles.greeting}>Hello, {currentUser?.name ?? '…'}</Text>
         <View style={styles.headerActions}>
           {currentUser?.role === 'admin' && (
@@ -109,9 +159,9 @@ export default function TimerScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      <ScrollView contentContainerStyle={styles.scrollContent} contentInsetAdjustmentBehavior="automatic">
         {/* Timer card */}
-        <View style={styles.timerCard}>
+        <View style={isIOS ? styles.timerCardIOS : styles.timerCard}>
           <Text style={styles.taskLabel}>
             {activeTask ? activeTask.title : 'No task running'}
           </Text>
@@ -135,11 +185,53 @@ export default function TimerScreen() {
           </View>
         </View>
 
+        {/* Auto-stop row */}
+        <View style={isIOS ? styles.autoStopCardIOS : styles.autoStopCard}>
+          <View style={styles.autoStopRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.autoStopLabel}>Auto-stop at end of day</Text>
+              <Pressable onPress={() => setShowHourPicker(true)} disabled={!autoStopEnabled}>
+                <Text style={[styles.autoStopTime, !autoStopEnabled && { color: '#bbb' }]}>
+                  {String(autoStopHour).padStart(2, '0')}:00 UTC
+                  {autoStopEnabled ? ' · tap to change' : ''}
+                </Text>
+              </Pressable>
+            </View>
+            <Switch
+              value={autoStopEnabled}
+              onValueChange={toggleAutoStop}
+              trackColor={{ false: '#e0e0e0', true: '#4f46e5' }}
+              thumbColor="#fff"
+            />
+          </View>
+        </View>
+
+        {/* Department filter chips */}
+        {(departments ?? []).length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.deptChips}>
+            <Pressable
+              style={[styles.chip, deptFilter === 'all' && styles.chipActive]}
+              onPress={() => setDeptFilter('all')}
+            >
+              <Text style={[styles.chipText, deptFilter === 'all' && styles.chipTextActive]}>All</Text>
+            </Pressable>
+            {(departments ?? []).map((d) => (
+              <Pressable
+                key={d._id}
+                style={[styles.chip, deptFilter === d._id && styles.chipActive]}
+                onPress={() => setDeptFilter(d._id)}
+              >
+                <Text style={[styles.chipText, deptFilter === d._id && styles.chipTextActive]}>{d.name}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        )}
+
         {/* Quick task list */}
-        {(tasksWithTime ?? []).length > 0 && (
-          <View style={styles.taskListSection}>
+        {filteredTasks.length > 0 && (
+          <View style={isIOS ? styles.taskListSectionIOS : styles.taskListSection}>
             <Text style={styles.taskListTitle}>My Tasks</Text>
-            {(tasksWithTime ?? []).map((task) => {
+            {filteredTasks.map((task) => {
               const isActive = activeTimer?.taskId === task._id;
               const displayTime = isActive ? elapsed : task.totalMs;
               return (
@@ -152,7 +244,7 @@ export default function TimerScreen() {
                     <View style={styles.taskRowMeta}>
                       <View style={[styles.statusDot, { backgroundColor: STATUS_COLOR[task.status] ?? '#999' }]} />
                       <Text style={styles.taskRowStatus}>
-                        {task.status === 'in_progress' ? 'In Progress' : 'Accepted'}
+                        {task.status === 'in_progress' ? 'In Progress' : 'To Do'}
                       </Text>
                       <Text style={styles.taskRowTime}>· {formatShort(displayTime)}</Text>
                     </View>
@@ -172,10 +264,10 @@ export default function TimerScreen() {
           </View>
         )}
 
-        {(tasksWithTime ?? []).length === 0 && (
+        {filteredTasks.length === 0 && (
           <View style={styles.noTasks}>
-            <Text style={styles.noTasksText}>No accepted tasks yet.</Text>
-            <Text style={styles.noTasksHint}>Go to Projects to create or accept tasks.</Text>
+            <Text style={styles.noTasksText}>No tasks to show.</Text>
+            <Text style={styles.noTasksHint}>Accept tasks from My Tasks to start timing.</Text>
           </View>
         )}
       </ScrollView>
@@ -186,10 +278,10 @@ export default function TimerScreen() {
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>Select a task</Text>
             <ScrollView>
-              {(tasksWithTime ?? []).length === 0 && (
+              {allTasks.length === 0 && (
                 <Text style={styles.emptyText}>No accepted tasks. Accept tasks first.</Text>
               )}
-              {(tasksWithTime ?? []).map((task) => (
+              {allTasks.map((task) => (
                 <Pressable
                   key={task._id}
                   style={[
@@ -203,12 +295,37 @@ export default function TimerScreen() {
                     <Text style={styles.taskOptionTime}>{formatShort(task.totalMs)} spent</Text>
                   </View>
                   <Text style={styles.taskOptionStatus}>
-                    {task.status === 'in_progress' ? 'In Progress' : 'Accepted'}
+                    {task.status === 'in_progress' ? 'In Progress' : 'To Do'}
                   </Text>
                 </Pressable>
               ))}
             </ScrollView>
             <Pressable style={styles.cancelBtn} onPress={() => setShowPicker(false)}>
+              <Text style={styles.cancelBtnText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Hour picker modal */}
+      <Modal visible={showHourPicker} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>Auto-stop hour (UTC)</Text>
+            <ScrollView style={{ maxHeight: 300 }}>
+              {UTC_HOURS.map((h) => (
+                <Pressable
+                  key={h}
+                  style={[styles.hourRow, autoStopHour === h && styles.hourRowActive]}
+                  onPress={() => setAutoStopHour(h)}
+                >
+                  <Text style={[styles.hourText, autoStopHour === h && styles.hourTextActive]}>
+                    {String(h).padStart(2, '0')}:00 UTC
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Pressable style={styles.cancelBtn} onPress={() => setShowHourPicker(false)}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </Pressable>
           </View>
@@ -220,12 +337,13 @@ export default function TimerScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f5f5' },
+  containerIOS: { backgroundColor: 'rgba(245,245,245,0.85)' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
-    paddingTop: 60,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
@@ -246,7 +364,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   signOutText: { color: '#dc2626', fontSize: 13, fontWeight: '600' },
-  scrollContent: { padding: 16, gap: 16, paddingBottom: 40 },
+  scrollContent: { padding: 16, gap: 12, paddingBottom: 120 },
+
+  // Timer card
   timerCard: {
     backgroundColor: '#fff',
     borderRadius: 20,
@@ -257,6 +377,18 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 12,
     elevation: 3,
+  },
+  timerCardIOS: {
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderRadius: 20,
+    padding: 28,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.8)',
   },
   taskLabel: { fontSize: 15, color: '#666', marginBottom: 10, textAlign: 'center' },
   timerText: {
@@ -279,7 +411,42 @@ const styles = StyleSheet.create({
   pauseBtn: { backgroundColor: '#f59e0b' },
   switchBtn: { backgroundColor: '#e5e7eb' },
   timerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  // Quick task list
+
+  // Auto-stop card
+  autoStopCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  autoStopCardIOS: {
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
+  autoStopRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  autoStopLabel: { fontSize: 15, fontWeight: '600', color: '#1a1a2e' },
+  autoStopTime: { fontSize: 13, color: '#4f46e5', marginTop: 2 },
+
+  // Dept chips
+  deptChips: { flexDirection: 'row', gap: 8, paddingVertical: 4 },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: '#e5e7eb',
+  },
+  chipActive: { backgroundColor: '#4f46e5' },
+  chipText: { fontSize: 13, fontWeight: '600', color: '#666' },
+  chipTextActive: { color: '#fff' },
+
+  // Task list
   taskListSection: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -290,6 +457,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 6,
     elevation: 2,
+  },
+  taskListSectionIOS: {
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderRadius: 16,
+    padding: 16,
+    gap: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.7)',
   },
   taskListTitle: { fontSize: 15, fontWeight: '700', color: '#1a1a2e', marginBottom: 4 },
   taskRow: {
@@ -333,6 +508,7 @@ const styles = StyleSheet.create({
   noTasks: { alignItems: 'center', paddingTop: 16, gap: 6 },
   noTasksText: { fontSize: 15, color: '#999', fontWeight: '500' },
   noTasksHint: { fontSize: 13, color: '#bbb', textAlign: 'center' },
+
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
   modalSheet: {
@@ -340,7 +516,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 20,
-    maxHeight: '70%',
+    maxHeight: '75%',
   },
   modalTitle: { fontSize: 18, fontWeight: '700', marginBottom: 16, color: '#1a1a2e' },
   taskOption: {
@@ -366,4 +542,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cancelBtnText: { color: '#666', fontSize: 16 },
+  hourRow: {
+    padding: 14,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  hourRowActive: { backgroundColor: '#ede9fe' },
+  hourText: { fontSize: 16, color: '#333' },
+  hourTextActive: { color: '#4f46e5', fontWeight: '700' },
 });

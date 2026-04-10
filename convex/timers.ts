@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { Id } from "./_generated/dataModel";
 
@@ -133,6 +133,109 @@ export const getMyTasksWithTime = query({
         return { ...task, totalMs };
       }),
     );
+  },
+});
+
+// Week summary: daily time breakdown for a given week
+// weekStart: Unix timestamp of Monday 00:00:00 in the user's local timezone
+export const getWeekSummary = query({
+  args: { weekStart: v.number() },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
+
+    const weekEnd = args.weekStart + 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    const sessions = await ctx.db
+      .query("timeSessions")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .take(1000);
+
+    // Only sessions that overlap this week
+    const weekSessions = sessions.filter((s) => {
+      const end = s.endTime ?? now;
+      return s.startTime < weekEnd && end > args.weekStart;
+    });
+
+    // Group by day index (0 = Monday … 6 = Sunday)
+    const byDay: number[] = [0, 0, 0, 0, 0, 0, 0];
+
+    for (const s of weekSessions) {
+      const duration = (s.endTime ?? now) - s.startTime;
+      const dayIdx = Math.min(
+        6,
+        Math.max(
+          0,
+          Math.floor((s.startTime - args.weekStart) / (24 * 60 * 60 * 1000)),
+        ),
+      );
+      byDay[dayIdx] += duration;
+    }
+
+    return byDay.map((totalMs, day) => ({ day, totalMs }));
+  },
+});
+
+// Add (or subtract) manual minutes to a task's logged time
+export const addManualTimeEntry = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    durationMinutes: v.number(), // positive to add, negative to subtract
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    const now = Date.now();
+    const durationMs = Math.round(args.durationMinutes * 60 * 1000);
+
+    await ctx.db.insert("timeSessions", {
+      taskId: args.taskId,
+      userId,
+      startTime: now,
+      endTime: now + durationMs,
+      isManual: true,
+    });
+  },
+});
+
+// Total time logged on a single task for the current user (including active session)
+export const getTaskTotalTime = query({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return 0;
+
+    const now = Date.now();
+    const sessions = await ctx.db
+      .query("timeSessions")
+      .withIndex("by_userId_and_taskId", (q) =>
+        q.eq("userId", userId).eq("taskId", args.taskId),
+      )
+      .take(200);
+
+    return sessions.reduce(
+      (acc, s) => acc + ((s.endTime ?? now) - s.startTime),
+      0,
+    );
+  },
+});
+
+// Internal: stop a specific user's active timer (used by auto-stop cron)
+export const stopUserActiveTimer = internalMutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const timer = await ctx.db
+      .query("activeTimers")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    if (!timer) return;
+
+    const now = Date.now();
+    await ctx.db.patch(timer.sessionId, { endTime: now });
+    await ctx.db.delete(timer._id);
+    await ctx.db.patch(timer.taskId, { status: "accepted" });
   },
 });
 
